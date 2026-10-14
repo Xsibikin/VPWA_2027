@@ -11,10 +11,14 @@ const tab = ref('login');
 const email = ref('');
 const password = ref('');
 const name = ref('');
-const handle = ref('');
+const lastName = ref('');
+const nick = ref('');
 const showPassword = ref(false);
 const loading = ref(false);
 const required = (value: string) => !!value.trim() || 'This field is required';
+// The nickname is what people type after @ and in commands, so it cannot contain spaces.
+const nickRule = (value: string) =>
+  /^[\w-]+$/.test(value) || 'Use letters, numbers, underscores or dashes';
 const emailRule = (value: string) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) || 'Enter a valid email address';
 function toggleTheme() {
@@ -28,13 +32,14 @@ async function submit(demo = false) {
     else if (tab.value === 'login') await auth.login(email.value, password.value);
     else
       await auth.register({
-        name: name.value,
-        handle: handle.value,
-        email: email.value,
+        name: name.value.trim(),
+        lastName: lastName.value.trim(),
+        nick: nick.value.trim(),
+        email: email.value.trim(),
         password: password.value,
       });
     $q.notify({
-      message: `Welcome ${auth.user?.name.split(' ')[0]}! Make yourself at home.`,
+      message: `Welcome ${auth.user?.name}! Make yourself at home.`,
       icon: 'waving_hand',
       color: 'primary',
     });
@@ -89,14 +94,20 @@ async function submit(demo = false) {
                   ><q-input
                     v-model="name"
                     outlined
-                    label="Full name"
-                    autocomplete="name"
+                    label="First name"
+                    autocomplete="given-name"
                     :rules="[required]" /><q-input
-                    v-model="handle"
+                    v-model="lastName"
                     outlined
-                    label="Display name"
+                    label="Last name"
+                    autocomplete="family-name"
+                    :rules="[required]" /><q-input
+                    v-model="nick"
+                    outlined
+                    label="Nickname"
+                    prefix="@"
                     autocomplete="nickname"
-                    :rules="[required]"
+                    :rules="[required, nickRule]"
                 /></template>
                 <q-input
                   v-model="email"

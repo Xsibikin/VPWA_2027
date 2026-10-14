@@ -4,7 +4,9 @@ import { useQuasar } from 'quasar';
 import { useAuthStore } from '@/stores/auth';
 import { useWorkspaceStore } from '@/stores/workspace';
 import { useChatStore } from '@/stores/chat';
+import UserProfileCard from '@/components/UserProfileCard.vue';
 import type { Message } from '@/types';
+import { fullName } from '@/utils/user';
 
 const props = defineProps<{ message: Message; inThread?: boolean }>();
 const auth = useAuthStore();
@@ -20,6 +22,16 @@ const author = computed(() =>
 const time = computed(() =>
   new Date(props.message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
 );
+// Splits the text so that @nicknames of real users can be rendered as highlighted chips.
+const parts = computed(() =>
+  props.message.text.split(/(@[\w-]+)/).map((text) => ({
+    text,
+    user: text.startsWith('@')
+      ? workspace.members.find((u) => u.nick.toLowerCase() === text.slice(1).toLowerCase())
+      : undefined,
+  })),
+);
+const mentionsMe = computed(() => props.message.mentions.includes(auth.user?.id ?? ''));
 const emojis = ['🙌', '💚', '👍', '🎉', '🚀', '👀'];
 async function react(emoji: string) {
   try {
@@ -30,7 +42,9 @@ async function react(emoji: string) {
 }
 async function share() {
   try {
-    await navigator.clipboard.writeText(`${author.value?.name}: ${props.message.text}`);
+    await navigator.clipboard.writeText(
+      `${author.value ? fullName(author.value) : 'Team member'}: ${props.message.text}`,
+    );
     $q.notify({ message: 'Message copied to clipboard.', icon: 'content_copy' });
   } catch {
     $q.notify({ message: 'Clipboard is unavailable in this browser.', type: 'negative' });
@@ -46,21 +60,33 @@ function thread() {
 <template>
   <article
     class="chat-message"
-    :class="{ 'own-message': message.userId === auth.user?.id }"
+    :class="{ 'own-message': message.userId === auth.user?.id, 'mentions-me': mentionsMe }"
     :id="`message-${message.id}`"
   >
-    <q-avatar size="38px" class="message-avatar"
-      ><img v-if="author" :src="author.avatar" :alt="author.name" /><span v-else>?</span></q-avatar
-    >
+    <q-avatar size="38px" class="message-avatar" :class="{ 'cursor-pointer': author }"
+      ><img v-if="author" :src="author.avatar" :alt="fullName(author)" /><span v-else>?</span
+      ><q-menu v-if="author" anchor="bottom left" self="top left"
+        ><UserProfileCard :user="author" /></q-menu
+    ></q-avatar>
     <div class="message-body">
       <div class="message-meta">
-        <strong>{{ author?.name ?? 'Team member' }}</strong
+        <strong class="message-author"
+          >{{ author ? fullName(author) : 'Team member'
+          }}<q-menu v-if="author" anchor="bottom left" self="top left"
+            ><UserProfileCard :user="author" /></q-menu></strong
         ><span v-if="message.userId === auth.user?.id" class="you-label">you</span
         ><time :datetime="message.createdAt">{{ time }}</time
         ><q-icon v-if="saved" name="bookmark" color="primary" size="13px" />
       </div>
       <div class="message-text">
-        {{ message.text }} <span v-if="message.edited" class="edited">(edited)</span>
+        <template v-for="(part, index) in parts" :key="index"
+          ><span v-if="part.user" class="mention"
+            >{{ part.text
+            }}<q-menu anchor="bottom left" self="top left"
+              ><UserProfileCard :user="part.user" /></q-menu></span
+          ><template v-else>{{ part.text }}</template></template
+        >
+        <span v-if="message.edited" class="edited">(edited)</span>
       </div>
       <div v-if="message.reactions.length" class="reactions">
         <q-btn
