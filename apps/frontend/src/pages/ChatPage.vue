@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, provide, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useQuasar, type QScrollArea } from 'quasar';
 import { useAuthStore } from '@/stores/auth';
@@ -7,6 +7,13 @@ import { useWorkspaceStore } from '@/stores/workspace';
 import { useChatStore } from '@/stores/chat';
 import ChatMessage from '@/components/ChatMessage.vue';
 import MessageComposer from '@/components/MessageComposer.vue';
+import TypingIndicator from '@/components/TypingIndicator.vue';
+import { useChannelCommands } from '@/composables/useChannelCommands';
+import { useRealtime } from '@/composables/useRealtime';
+import { directMessagesKey } from '@/injectionKeys';
+import { COMMANDS, isCommand } from '@/services/commands';
+import type { Channel, ChannelInvite, UserState } from '@/types';
+import { fullName, presenceClass, stateLabels } from '@/utils/user';
 
 const $q = useQuasar();
 const router = useRouter();
@@ -19,37 +26,63 @@ const messageSearch = ref('');
 const showSearch = ref(false);
 const channelsOpen = ref(true);
 const dmsOpen = ref(true);
-const dialog = ref<'channel' | 'members' | 'info' | 'settings' | null>(null);
+// 'members' lists the people in the open channel, 'people' everyone in the workspace.
+const dialog = ref<'channel' | 'members' | 'people' | 'info' | 'settings' | null>(null);
 const channelName = ref('');
 const channelTopic = ref('');
+const channelPrivate = ref(false);
 const creating = ref(false);
+const runningCommand = ref(false);
 const scroll = ref<QScrollArea>();
+const scrollTarget = ref<Element>();
+const nearBottom = ref(true);
 const threadScroll = ref<QScrollArea>();
 const composer = ref<InstanceType<typeof MessageComposer>>();
 const replyComposer = ref<InstanceType<typeof MessageComposer>>();
 const split = ref(67);
-const activeChannel = computed(() => workspace.channels.find((c) => c.id === chat.activeId));
+const states: UserState[] = ['Online', 'DND', 'Offline'];
+const stateOptions = states.map((value) => ({ value, label: stateLabels[value] }));
+const activeChannel = computed(() =>
+  chat.kind === 'channel' ? workspace.channels.find((c) => c.id === chat.activeId) : undefined,
+);
 const activeDm = computed(() => workspace.dms.find((d) => d.id === chat.activeId));
+const dmName = computed(() => (activeDm.value ? fullName(activeDm.value.user) : 'your teammate'));
 const title = computed(() =>
-  chat.kind === 'channel'
-    ? (activeChannel.value?.name ?? 'general')
-    : (activeDm.value?.user.name ?? 'Direct message'),
+  chat.kind === 'channel' ? (activeChannel.value?.name ?? 'general') : dmName.value,
 );
 const topic = computed(() =>
-  chat.kind === 'channel'
-    ? activeChannel.value?.topic
-    : `A conversation with ${activeDm.value?.user.name ?? 'your teammate'}`,
+  chat.kind === 'channel' ? activeChannel.value?.topic : `A conversation with ${dmName.value}`,
 );
-const filteredChannels = computed(() =>
-  workspace.channels.filter((c) =>
-    c.name.toLowerCase().includes(sidebarSearch.value.toLowerCase()),
+const channelAdmin = computed(() =>
+  workspace.members.find((user) => user.id === activeChannel.value?.owner),
+);
+// People the composer suggests after "@": the channel's members, or the other person in a DM.
+const mentionCandidates = computed(() =>
+  (chat.kind === 'channel' ? chat.members : activeDm.value ? [activeDm.value.user] : []).filter(
+    (user) => user.id !== auth.user?.id,
   ),
 );
-const filteredDms = computed(() =>
-  workspace.dms.filter((d) =>
-    d.user.name.toLowerCase().includes(sidebarSearch.value.toLowerCase()),
-  ),
+// Nick suggestions for command arguments: only people the command can actually act on.
+const commandUsers = computed(() => {
+  if (chat.kind !== 'channel') return {};
+  const outside = workspace.members.filter(
+    (user) => !chat.members.some((member) => member.id === user.id),
+  );
+  return { invite: outside, kick: mentionCandidates.value, revoke: mentionCandidates.value };
+});
+const headerAvatars = computed(() =>
+  chat.kind === 'channel' ? chat.members.slice(0, 3) : workspace.members.slice(1, 4),
 );
+const listedMembers = computed(() =>
+  dialog.value === 'members' && chat.kind === 'channel' ? chat.members : workspace.members,
+);
+const matchesSearch = (name: string) =>
+  name.toLowerCase().includes(sidebarSearch.value.toLowerCase());
+const filteredChannels = computed(() => workspace.channels.filter((c) => matchesSearch(c.name)));
+const filteredInvites = computed(() =>
+  workspace.invites.filter((invite) => matchesSearch(invite.channel.name)),
+);
+const filteredDms = computed(() => workspace.dms.filter((d) => matchesSearch(fullName(d.user))));
 const filteredMessages = computed(() =>
   chat.messages.filter((m) => m.text.toLowerCase().includes(messageSearch.value.toLowerCase())),
 );
@@ -71,6 +104,15 @@ watch(
 function notifyError(error: unknown) {
   $q.notify({ type: 'negative', message: (error as Error).message });
 }
+// The "Message" button in a profile card opens the direct message with that person.
+const dmWith = (userId: string) => workspace.dms.find((dm) => dm.user.id === userId);
+provide(directMessagesKey, {
+  canMessage: (userId) => !!dmWith(userId),
+  open: async (userId) => {
+    const dm = dmWith(userId);
+    if (dm) await select('dm', dm.id, dm.unreadCount);
+  },
+});
 async function select(kind: 'channel' | 'dm', id: string, unread: number) {
   messageSearch.value = '';
   showSearch.value = false;
@@ -82,7 +124,99 @@ async function select(kind: 'channel' | 'dm', id: string, unread: number) {
     notifyError(error);
   }
 }
+// Opens #general when the user is in it, otherwise the first conversation there is.
+async function openFirst() {
+  const channel = workspace.channels.find((c) => c.name === 'general') ?? workspace.channels[0];
+  const dm = workspace.dms[0];
+  if (channel) await select('channel', channel.id, channel.unreadCount);
+  else if (dm) await select('dm', dm.id, dm.unreadCount);
+}
+// After an Offline period: reload the channel list and the open conversation.
+async function refresh() {
+  try {
+    await workspace.load();
+    const current = (chat.kind === 'channel' ? workspace.channels : workspace.dms).find(
+      (item) => item.id === chat.activeId,
+    );
+    if (current) await select(chat.kind, current.id, current.unreadCount);
+    else await openFirst();
+  } catch (error) {
+    notifyError(error);
+  }
+}
+const commands = useChannelCommands({
+  open: (channel) => select('channel', channel.id, channel.unreadCount),
+  openFirst,
+  showMembers: () => {
+    dialog.value = 'members';
+  },
+});
+const { permission, enableNotifications } = useRealtime(refresh);
+// Shows the outcome of a command or a channel action as a toast.
+async function report(action: Promise<string>) {
+  try {
+    const message = await action;
+    if (message) $q.notify({ message, icon: 'tag', color: 'primary' });
+    return true;
+  } catch (error) {
+    notifyError(error);
+    return false;
+  }
+}
+function confirmLeave(channel: Channel) {
+  $q.dialog({
+    title: `Leave #${channel.name}?`,
+    message:
+      channel.owner === auth.user?.id
+        ? 'You are the admin of this channel. If you leave, it is closed for everyone.'
+        : 'The channel will disappear from your list.',
+    cancel: true,
+    ok: 'Leave',
+  }).onOk(() => void report(commands.leave(channel)));
+}
+function confirmClose(channel: Channel) {
+  $q.dialog({
+    title: `Close #${channel.name}?`,
+    message: 'The channel and its messages are removed for everyone.',
+    cancel: true,
+    ok: 'Close channel',
+  }).onOk(() => void report(commands.close(channel)));
+}
+async function acceptInvite(invite: ChannelInvite) {
+  try {
+    const channel = await workspace.acceptInvite(invite.id);
+    await select('channel', channel.id, channel.unreadCount);
+  } catch (error) {
+    notifyError(error);
+  }
+}
+async function declineInvite(invite: ChannelInvite) {
+  try {
+    await workspace.declineInvite(invite.id);
+  } catch (error) {
+    notifyError(error);
+  }
+}
+async function updateSettings(settings: Parameters<typeof auth.updateSettings>[0]) {
+  try {
+    await auth.updateSettings(settings);
+    if (auth.user) {
+      workspace.syncMember(auth.user);
+      chat.syncMember(auth.user);
+    }
+  } catch (error) {
+    notifyError(error);
+  }
+}
 async function send(text: string, thread = false) {
+  // Anything that starts with a slash in the main command line is a command, not a message.
+  if (!thread && isCommand(text)) {
+    if (runningCommand.value) return;
+    runningCommand.value = true;
+    if (await report(commands.run(text))) composer.value?.clear();
+    runningCommand.value = false;
+    return;
+  }
   try {
     await chat.send(text, thread);
     (thread ? replyComposer.value : composer.value)?.clear();
@@ -113,10 +247,15 @@ function toggleTheme() {
 async function addChannel() {
   creating.value = true;
   try {
-    const channel = await workspace.addChannel(channelName.value, channelTopic.value);
+    const channel = await workspace.addChannel(
+      channelName.value,
+      channelTopic.value,
+      channelPrivate.value ? 'private' : 'public',
+    );
     dialog.value = null;
     channelName.value = '';
     channelTopic.value = '';
+    channelPrivate.value = false;
     await select('channel', channel.id, 0);
     $q.notify({ message: 'Your new channel is ready.', color: 'primary', icon: 'tag' });
   } catch (error) {
@@ -141,11 +280,33 @@ function newDay(index: number) {
       dateLabel(filteredMessages.value[index - 1]!.createdAt)
   );
 }
+function onScroll(info: {
+  verticalSize: number;
+  verticalPosition: number;
+  verticalContainerSize: number;
+}) {
+  nearBottom.value = info.verticalSize - info.verticalPosition - info.verticalContainerSize < 150;
+}
+// Infinite scroll: QInfiniteScroll asks for the previous page when the user nears the top
+// and keeps the scroll position stable once the page is rendered.
+async function loadOlder(_index: number, done: (stop?: boolean) => void) {
+  try {
+    await chat.loadOlder();
+  } catch (error) {
+    notifyError(error);
+  }
+  done(!chat.hasMore);
+}
+// Jump to the newest message after opening a conversation and after sending; an incoming
+// message only moves the view when the user is already reading the end of the conversation.
 watch(
-  () => [chat.messages.length, chat.loading],
-  async () => {
+  () => [chat.messages.at(-1)?.id, chat.loading] as const,
+  async ([lastId, loading], [previousId, wasLoading]) => {
+    const opened = wasLoading && !loading;
+    const own = lastId !== previousId && chat.messages.at(-1)?.userId === auth.user?.id;
+    if (!opened && !own && !nearBottom.value) return;
     await nextTick();
-    scroll.value?.setScrollPosition('vertical', 100000, 250);
+    scroll.value?.setScrollPosition('vertical', 100000, opened ? 0 : 250);
   },
 );
 watch(
@@ -156,13 +317,10 @@ watch(
   },
 );
 onMounted(async () => {
+  scrollTarget.value = scroll.value?.getScrollTarget();
   try {
     await workspace.load();
-    await select(
-      'channel',
-      'general',
-      workspace.channels.find((c) => c.id === 'general')?.unreadCount ?? 0,
-    );
+    await openFirst();
   } catch (error) {
     notifyError(error);
   }
@@ -186,7 +344,7 @@ onMounted(async () => {
           /><kbd></kbd>
         </div>
         <div class="toolbar-right">
-          ><q-btn
+          <q-btn
             flat
             round
             dense
@@ -258,15 +416,33 @@ onMounted(async () => {
           @click="toggleTheme"
           ><q-tooltip>Switch theme</q-tooltip></q-btn
         ><q-btn flat round aria-label="Your profile"
-          ><q-avatar size="36px"><img :src="auth.user?.avatar" :alt="auth.user?.name" /></q-avatar
-          ><span class="presence online"></span
+          ><q-avatar size="36px"><img :src="auth.user?.avatar" :alt="auth.user?.nick" /></q-avatar
+          ><span class="presence" :class="presenceClass(auth.user?.state)"></span
           ><q-menu
-            ><q-list
+            ><q-list style="min-width: 210px"
               ><q-item
                 ><q-item-section
-                  ><b>{{ auth.user?.name }}</b
-                  ><small class="muted">{{ auth.user?.email }}</small></q-item-section
+                  ><b>{{ auth.user ? fullName(auth.user) : '' }}</b
+                  ><small class="muted"
+                    >@{{ auth.user?.nick }} · {{ auth.user?.email }}</small
+                  ></q-item-section
                 ></q-item
+              ><q-separator /><q-item-label header>Set your status</q-item-label
+              ><q-item
+                v-for="state in states"
+                :key="state"
+                v-close-popup
+                clickable
+                :active="auth.user?.state === state"
+                @click="updateSettings({ state })"
+                ><q-item-section avatar
+                  ><span
+                    class="presence inline-presence"
+                    :class="presenceClass(state)"
+                  ></span></q-item-section
+                ><q-item-section>{{ stateLabels[state] }}</q-item-section
+                ><q-item-section v-if="auth.user?.state === state" side
+                  ><q-icon name="check" size="16px" /></q-item-section></q-item
               ><q-separator /><q-item v-close-popup clickable @click="dialog = 'settings'"
                 ><q-item-section>Preferences</q-item-section></q-item
               ><q-item v-close-popup clickable @click="logout"
@@ -311,7 +487,7 @@ onMounted(async () => {
         >
         <div class="workspace-status">
           <span class="status-dot"></span
-          >{{ workspace.members.filter((m) => m.presence === 'online').length }} members online
+          >{{ workspace.members.filter((m) => m.state === 'Online').length }} members online
         </div>
       </div>
       <q-input
@@ -360,6 +536,41 @@ onMounted(async () => {
           ><q-skeleton v-for="n in 6" :key="n" type="text" class="q-mx-md q-my-sm"
         /></template>
         <q-list v-else-if="channelsOpen" class="channel-list"
+          ><q-item v-for="invite in filteredInvites" :key="invite.id" class="invited"
+            ><q-item-section avatar
+              ><q-icon v-if="invite.channel.type === 'private'" name="lock" size="15px" /><span
+                v-else
+                class="hash"
+                >#</span
+              ></q-item-section
+            ><q-item-section
+              ><q-item-label>{{ invite.channel.name }}</q-item-label
+              ><q-item-label caption
+                >Invited by @{{ invite.inviter.nick }}</q-item-label
+              ></q-item-section
+            ><q-item-section side
+              ><div class="row no-wrap">
+                <q-btn
+                  flat
+                  round
+                  dense
+                  size="sm"
+                  icon="check"
+                  :aria-label="`Accept invitation to ${invite.channel.name}`"
+                  @click="acceptInvite(invite)"
+                  ><q-tooltip>Join channel</q-tooltip></q-btn
+                ><q-btn
+                  flat
+                  round
+                  dense
+                  size="sm"
+                  icon="close"
+                  :aria-label="`Decline invitation to ${invite.channel.name}`"
+                  @click="declineInvite(invite)"
+                  ><q-tooltip>Decline</q-tooltip></q-btn
+                >
+              </div></q-item-section
+            ></q-item
           ><q-item
             v-for="channel in filteredChannels"
             :key="channel.id"
@@ -367,15 +578,47 @@ onMounted(async () => {
             :active="chat.kind === 'channel' && chat.activeId === channel.id"
             :class="{ 'has-unread': channel.unreadCount }"
             @click="select('channel', channel.id, channel.unreadCount)"
-            ><q-item-section avatar><span class="hash">#</span></q-item-section
+            ><q-item-section avatar
+              ><q-icon v-if="channel.type === 'private'" name="lock" size="15px" /><span
+                v-else
+                class="hash"
+                >#</span
+              ></q-item-section
             ><q-item-section>{{ channel.name }}</q-item-section
             ><q-item-section v-if="channel.unreadCount" side
               ><q-badge :label="channel.unreadCount" rounded /></q-item-section
             ><q-item-section
               v-else-if="chat.kind === 'channel' && chat.activeId === channel.id"
               side
-              ><span class="active-channel-dot"></span></q-item-section></q-item
-          ><q-item v-if="!filteredChannels.length"
+              ><span class="active-channel-dot"></span></q-item-section
+            ><q-item-section side class="channel-menu"
+              ><q-btn
+                flat
+                round
+                dense
+                size="xs"
+                icon="more_horiz"
+                :aria-label="`Actions for ${channel.name}`"
+                @click.stop
+                ><q-menu
+                  ><q-list dense style="min-width: 170px"
+                    ><q-item v-close-popup clickable @click="confirmLeave(channel)"
+                      ><q-item-section avatar><q-icon name="logout" size="17px" /></q-item-section
+                      ><q-item-section>Leave channel</q-item-section></q-item
+                    ><q-item
+                      v-if="channel.owner === auth.user?.id"
+                      v-close-popup
+                      clickable
+                      @click="confirmClose(channel)"
+                      ><q-item-section avatar
+                        ><q-icon name="delete_outline" size="17px" /></q-item-section
+                      ><q-item-section>Close channel</q-item-section></q-item
+                    ></q-list
+                  ></q-menu
+                ></q-btn
+              ></q-item-section
+            ></q-item
+          ><q-item v-if="!filteredChannels.length && !filteredInvites.length"
             ><q-item-section class="muted">No channels found</q-item-section></q-item
           ><q-item clickable class="add-channel" @click="dialog = 'channel'"
             ><q-item-section avatar><q-icon name="add" size="17px" /></q-item-section
@@ -397,7 +640,7 @@ onMounted(async () => {
             size="sm"
             icon="add"
             aria-label="Browse members"
-            @click="dialog = 'members'"
+            @click="dialog = 'people'"
           />
         </div>
         <q-list v-if="dmsOpen" class="dm-list"
@@ -410,12 +653,16 @@ onMounted(async () => {
             @click="select('dm', dm.id, dm.unreadCount)"
             ><q-item-section avatar
               ><div class="dm-avatar">
-                <q-avatar size="25px"><img :src="dm.user.avatar" :alt="dm.user.name" /></q-avatar
-                ><span class="presence" :class="dm.user.presence"></span></div></q-item-section
-            ><q-item-section>{{ dm.user.name }}</q-item-section
+                <q-avatar size="25px"
+                  ><img :src="dm.user.avatar" :alt="fullName(dm.user)" /></q-avatar
+                ><span
+                  class="presence"
+                  :class="presenceClass(dm.user.state)"
+                ></span></div></q-item-section
+            ><q-item-section>{{ fullName(dm.user) }}</q-item-section
             ><q-item-section v-if="dm.unreadCount" side
               ><q-badge :label="dm.unreadCount" rounded /></q-item-section
-            ><q-item-section v-else-if="dm.user.presence === 'away'" side
+            ><q-item-section v-else-if="dm.user.state === 'DND'" side
               ><q-icon name="dark_mode" size="12px" /></q-item-section></q-item
           ><q-item v-if="!filteredDms.length && !workspace.loading"
             ><q-item-section class="muted">No teammates found</q-item-section></q-item
@@ -441,7 +688,12 @@ onMounted(async () => {
           />
           <div class="channel-identity">
             <div class="channel-name">
-              <span v-if="chat.kind === 'channel'" class="header-hash">#</span
+              <q-icon
+                v-if="activeChannel?.type === 'private'"
+                name="lock"
+                size="19px"
+                class="header-lock"
+              /><span v-else-if="chat.kind === 'channel'" class="header-hash">#</span
               ><q-avatar v-else size="29px"
                 ><img :src="activeDm?.user.avatar" :alt="title"
               /></q-avatar>
@@ -465,14 +717,9 @@ onMounted(async () => {
             aria-label="View channel members"
             @click="dialog = 'members'"
             ><div class="header-avatars">
-              <img
-                v-for="user in workspace.members.slice(1, 4)"
-                :key="user.id"
-                :src="user.avatar"
-                alt=""
-              />
+              <img v-for="user in headerAvatars" :key="user.id" :src="user.avatar" alt="" />
             </div>
-            <span>{{ chat.kind === 'channel' ? workspace.members.length : 2 }}</span></q-btn
+            <span>{{ chat.kind === 'channel' ? chat.members.length : 2 }}</span></q-btn
           ><q-separator vertical inset class="header-separator" /><q-btn
             flat
             round
@@ -530,8 +777,8 @@ onMounted(async () => {
         >
           <template #before
             ><div class="conversation-pane">
-              <q-scroll-area ref="scroll" class="message-scroll">
-                <div class="conversation-welcome">
+              <q-scroll-area ref="scroll" class="message-scroll" @scroll="onScroll">
+                <div v-if="chat.loading || !chat.hasMore" class="conversation-welcome">
                   <div class="welcome-symbol">{{ chat.kind === 'channel' ? '#' : '👋' }}</div>
                   <div>
                     <div class="welcome-eyebrow">
@@ -545,7 +792,7 @@ onMounted(async () => {
                       {{
                         chat.kind === 'channel'
                           ? `Welcome to #${title}`
-                          : `You and ${activeDm?.user.name.split(' ')[0]}`
+                          : `You and ${activeDm?.user.name}`
                       }}<span> ✨</span>
                     </h2>
                     <p>
@@ -568,7 +815,17 @@ onMounted(async () => {
                     </div>
                   </div>
                 </div>
-                <template v-else
+                <q-infinite-scroll
+                  v-else
+                  :key="chat.activeId"
+                  reverse
+                  :offset="250"
+                  :scroll-target="scrollTarget"
+                  :disable="!!messageSearch"
+                  @load="loadOlder"
+                  ><template #loading
+                    ><div class="row justify-center q-py-md">
+                      <q-spinner-dots color="primary" size="30px" /></div></template
                   ><template v-for="(message, index) in filteredMessages" :key="message.id"
                     ><div v-if="newDay(index)" class="day-divider">
                       <q-separator /><span
@@ -598,27 +855,22 @@ onMounted(async () => {
                           : 'Be the first to say something good.'
                       }}
                     </p>
-                  </div></template
+                  </div></q-infinite-scroll
                 >
               </q-scroll-area>
               <div class="composer-wrap">
-                <div class="typing-indicator">
-                  <span class="typing-dots"><i></i><i></i><i></i></span
-                  ><span
-                    ><b>{{
-                      chat.kind === 'channel' ? 'Olivia' : activeDm?.user.name.split(' ')[0]
-                    }}</b>
-                    is typing<span class="typing-demo"> · demo</span></span
-                  >
-                </div>
+                <TypingIndicator />
                 <MessageComposer
                   ref="composer"
+                  :users="mentionCandidates"
+                  :commands="COMMANDS"
+                  :command-users="commandUsers"
                   :placeholder="
                     chat.kind === 'channel'
-                      ? `Message #${title}`
-                      : `Message ${activeDm?.user.name.split(' ')[0]}`
+                      ? `Message #${title} or type a /command`
+                      : `Message ${activeDm?.user.name}`
                   "
-                  :loading="chat.sending || chat.loading"
+                  :loading="chat.sending || chat.loading || runningCommand"
                   @send="send"
                 />
               </div></div
@@ -663,6 +915,7 @@ onMounted(async () => {
               <div class="thread-composer">
                 <MessageComposer
                   ref="replyComposer"
+                  :users="mentionCandidates"
                   placeholder="Reply in thread…"
                   compact
                   :loading="chat.sending"
@@ -716,6 +969,7 @@ onMounted(async () => {
         <div class="thread-composer">
           <MessageComposer
             ref="replyComposer"
+            :users="mentionCandidates"
             placeholder="Reply in thread…"
             compact
             :loading="chat.sending"
@@ -731,11 +985,13 @@ onMounted(async () => {
             {{
               dialog === 'channel'
                 ? 'A new place to connect'
-                : dialog === 'members'
-                  ? 'Good company'
-                  : dialog === 'settings'
-                    ? 'Make it yours'
-                    : `About ${chat.kind === 'channel' ? '#' : ''}${title}`
+                : dialog === 'members' && activeChannel
+                  ? `Members of #${title}`
+                  : dialog === 'members' || dialog === 'people'
+                    ? 'Good company'
+                    : dialog === 'settings'
+                      ? 'Make it yours'
+                      : `About ${chat.kind === 'channel' ? '#' : ''}${title}`
             }}
           </h2>
           <q-space /><q-btn
@@ -756,8 +1012,10 @@ onMounted(async () => {
               :rules="[(v) => !!v.trim() || 'A name is required']" /><q-input
               v-model="channelTopic"
               outlined
-              label="Topic (optional)"
-              class="q-mb-lg" /><q-btn
+              label="Topic (optional)" /><q-toggle
+              v-model="channelPrivate"
+              label="Private channel — only people you invite can join"
+              class="q-my-md" /><br /><q-btn
               unelevated
               color="primary"
               no-caps
@@ -765,9 +1023,9 @@ onMounted(async () => {
               type="submit"
               :loading="creating"
           /></q-form>
-          <q-list v-else-if="dialog === 'members'"
+          <q-list v-else-if="dialog === 'members' || dialog === 'people'"
             ><q-item
-              v-for="member in workspace.members"
+              v-for="member in listedMembers"
               :key="member.id"
               clickable
               @click="
@@ -777,18 +1035,42 @@ onMounted(async () => {
               "
               ><q-item-section avatar
                 ><q-avatar size="38px"
-                  ><img :src="member.avatar" :alt="member.name" /></q-avatar></q-item-section
+                  ><img :src="member.avatar" :alt="fullName(member)" /></q-avatar></q-item-section
               ><q-item-section
-                ><b>{{ member.name }}</b
-                ><small class="muted">@{{ member.handle }}</small></q-item-section
+                ><b>{{ fullName(member) }}</b
+                ><small class="muted"
+                  >@{{ member.nick }}
+                  <span v-if="dialog === 'members' && member.id === activeChannel?.owner"
+                    >· admin</span
+                  ></small
+                ></q-item-section
               ><q-item-section side
-                ><span
-                  class="presence inline-presence"
-                  :class="member.presence"
-                ></span></q-item-section></q-item
+                ><div class="row items-center no-wrap q-gutter-x-sm">
+                  <small class="muted">{{ stateLabels[member.state] }}</small
+                  ><span
+                    class="presence inline-presence"
+                    :class="presenceClass(member.state)"
+                  ></span></div></q-item-section></q-item
           ></q-list>
           <div v-else-if="dialog === 'settings'">
             <p class="muted">{{ workspace.workspace?.description }}</p>
+            <q-item
+              ><q-item-section
+                ><b>Status</b
+                ><small class="muted"
+                  >Offline pauses incoming messages until you are back online.</small
+                ><q-btn-toggle
+                  :model-value="auth.user?.state"
+                  :options="stateOptions"
+                  no-caps
+                  unelevated
+                  spread
+                  toggle-color="primary"
+                  class="status-toggle"
+                  @update:model-value="
+                    (state: UserState) => updateSettings({ state })
+                  " /></q-item-section
+            ></q-item>
             <q-item
               ><q-item-section
                 ><b>Appearance</b
@@ -799,9 +1081,45 @@ onMounted(async () => {
                   checked-icon="dark_mode"
                   unchecked-icon="light_mode"
                   @update:model-value="toggleTheme" /></q-item-section></q-item
+            ><q-item
+              ><q-item-section
+                ><b>Notify me about mentions only</b
+                ><small class="muted"
+                  >Skip notifications for messages that do not @mention you.</small
+                ></q-item-section
+              ><q-item-section side
+                ><q-toggle
+                  :model-value="auth.user?.mentionOnlyNotif ?? false"
+                  @update:model-value="
+                    (value: boolean) => updateSettings({ mentionOnlyNotif: value })
+                  " /></q-item-section></q-item
+            ><q-item
+              ><q-item-section
+                ><b>Browser notifications</b
+                ><small class="muted"
+                  >Shown for new messages while Gather is in the background. Paused in Do not
+                  disturb.</small
+                ></q-item-section
+              ><q-item-section side
+                ><q-btn
+                  v-if="permission === 'default'"
+                  outline
+                  dense
+                  no-caps
+                  color="primary"
+                  label="Enable"
+                  @click="enableNotifications"
+                /><small v-else class="muted">{{
+                  permission === 'granted'
+                    ? 'Enabled'
+                    : permission === 'denied'
+                      ? 'Blocked in browser'
+                      : 'Not supported'
+                }}</small></q-item-section
+              ></q-item
             ><q-separator class="q-my-md" />
             <p>
-              <b>{{ auth.user?.name }}</b
+              <b>{{ auth.user ? fullName(auth.user) : '' }}</b
               ><br /><span class="muted">{{ auth.user?.email }}</span>
             </p>
             <q-btn
@@ -818,6 +1136,16 @@ onMounted(async () => {
           <div v-else>
             <div class="info-label">TOPIC</div>
             <p>{{ topic }}</p>
+            <template v-if="activeChannel"
+              ><div class="info-label">CHANNEL</div>
+              <p>
+                {{ activeChannel.type === 'private' ? 'Private' : 'Public' }} channel · admin @{{
+                  channelAdmin?.nick
+                }}<br /><span class="muted"
+                  >A channel with no new messages for 30 days is closed automatically.</span
+                >
+              </p></template
+            >
             <div class="info-label">A LITTLE ABOUT THIS SPACE</div>
             <p class="muted">
               A place for thoughtful conversations, shared ideas, and the little things that bring
@@ -828,7 +1156,7 @@ onMounted(async () => {
               no-caps
               color="primary"
               icon="people_outline"
-              :label="`${chat.kind === 'channel' ? workspace.members.length : 2} members`"
+              :label="`${chat.kind === 'channel' ? chat.members.length : 2} members`"
               @click="dialog = 'members'"
             />
           </div> </q-card-section></q-card

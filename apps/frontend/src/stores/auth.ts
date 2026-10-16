@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import * as api from '@/services/api';
-import type { RegisterPayload, User } from '@/types';
+import type { RegisterPayload, User, UserSettings } from '@/types';
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null);
@@ -30,5 +30,9 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null;
   }
 
-  return { user, initialized, restore, login, register, logout };
+  async function updateSettings(settings: Partial<UserSettings>) {
+    user.value = await api.updateSettings(settings);
+  }
+
+  return { user, initialized, restore, login, register, logout, updateSettings };
 });
