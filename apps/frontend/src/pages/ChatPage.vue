@@ -371,28 +371,6 @@ onMounted(async () => {
         @click="drawer = !drawer"
         ><q-tooltip anchor="center right" self="center left">Studio North</q-tooltip></q-btn
       >
-      <q-btn
-        flat
-        class="workspace-avatar second-workspace"
-        icon="landscape"
-        aria-label="Explore workspaces"
-        @click="
-          $q.dialog({
-            title: 'Your workspaces',
-            message: 'You’re in Studio North. More workspaces are coming soon.',
-          })
-        "
-        ><q-tooltip anchor="center right" self="center left">Explore workspaces</q-tooltip></q-btn
-      >
-      <q-btn
-        flat
-        round
-        class="rail-add"
-        icon="add"
-        aria-label="Add workspace"
-        @click="$q.notify('New workspaces are coming soon.')"
-        ><q-tooltip anchor="center right" self="center left">Add a workspace</q-tooltip></q-btn
-      >
       <q-separator class="rail-separator" />
       <q-btn
         flat
@@ -721,20 +699,6 @@ onMounted(async () => {
             </div>
             <span>{{ chat.kind === 'channel' ? chat.members.length : 2 }}</span></q-btn
           ><q-separator vertical inset class="header-separator" /><q-btn
-            flat
-            round
-            dense
-            icon="headset_mic"
-            aria-label="Start huddle"
-            @click="
-              $q.dialog({
-                title: 'A little face time?',
-                message:
-                  'Voice huddles are coming soon. In the meantime, say hello in the conversation.',
-              })
-            "
-            ><q-tooltip>Start a huddle</q-tooltip></q-btn
-          ><q-btn
             flat
             round
             dense
