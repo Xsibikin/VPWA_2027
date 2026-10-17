@@ -1,5 +1,13 @@
-import { channels, dms, unread } from '@/mocks/data';
-import { channelMembers, insertMessage, isMember, sessionUser, unreadKey } from '@/mocks/db';
+import { channels, unread } from '@/mocks/data';
+import {
+  channelMembers,
+  dmsOf,
+  insertMessage,
+  isMember,
+  sessionUser,
+  toDm,
+  unreadKey,
+} from '@/mocks/db';
 import type { Message, User } from '@/types';
 
 // Mock of the future WebSocket connection. Teammates "type" and send messages on a timer, so
@@ -63,10 +71,10 @@ function conversations(me: User): Conversation[] {
         scope: { channelId: channel.id },
         authors: channelMembers(channel.id).filter(canWrite),
       })),
-    ...dms.map((dm) => ({
-      id: dm.id,
-      scope: { dmId: dm.id },
-      authors: [dm.user].filter(canWrite),
+    ...dmsOf(me.id).map((row) => ({
+      id: row.id,
+      scope: { dmId: row.id },
+      authors: [toDm(row, me.id).user].filter(canWrite),
     })),
   ].filter((conversation) => conversation.authors.length);
 }

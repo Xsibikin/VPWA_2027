@@ -117,45 +117,6 @@ body {
   color: var(--green);
 }
 
-.global-search {
-  width: 460px;
-  max-width: 40vw;
-  height: 33px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 11px;
-  border: 1px solid #d5ddd0;
-  border-radius: 7px;
-  background: #ffffff60;
-  color: #6e7a6c;
-}
-
-.body--dark .global-search {
-  background: #ffffff05;
-  border-color: var(--line);
-}
-
-.global-search .q-input {
-  flex: 1;
-}
-
-.global-search .q-field__control {
-  height: 30px;
-}
-
-.global-search .q-field__native {
-  font-size: 12px;
-}
-
-.global-search kbd {
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 10px;
-  white-space: nowrap;
-}
-
 .toolbar-right {
   margin-left: auto;
   display: flex;
@@ -235,8 +196,9 @@ body {
   z-index: 2999;
 }
 
+/* The rail (72px) plus the sidebar; ChatPage sets --sidebar-width (full, mini or hidden). */
 .chat-page-container {
-  padding-left: 332px !important;
+  padding-left: calc(72px + var(--sidebar-width, 260px)) !important;
 }
 
 .sidebar-heading {
@@ -389,11 +351,6 @@ body {
   height: 6px;
   border-radius: 50%;
   background: #5a8b63;
-}
-
-.channel-list .add-channel {
-  color: #9aa191;
-  font-weight: 400;
 }
 
 .dm-heading {
@@ -1390,6 +1347,117 @@ body {
   }
 }
 
+/* Sidebar: collapse button, favourites and the collapsed (mini) state */
+.sidebar-heading {
+  position: relative;
+}
+
+.sidebar-collapse {
+  position: absolute;
+  top: 18px;
+  right: 10px;
+  color: var(--muted);
+}
+
+.channel-name .q-btn.is-favorite {
+  color: #e0a93b;
+}
+
+.mini-sidebar {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 14px;
+}
+
+.mini-expand {
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.mini-scroll {
+  flex: 1;
+  width: 100%;
+}
+
+.mini-list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 16px;
+}
+
+.mini-item {
+  padding: 0;
+}
+
+.mini-item.active .q-avatar {
+  box-shadow:
+    0 0 0 2px var(--sidebar),
+    0 0 0 4px var(--green);
+}
+
+.mini-item.invited .q-avatar {
+  box-shadow:
+    0 0 0 2px var(--sidebar),
+    0 0 0 4px #e0a93b;
+}
+
+.mini-channel {
+  background: var(--selection);
+  color: var(--green);
+  font-weight: 700;
+  font-size: 17px;
+}
+
+.mini-separator {
+  width: 32px;
+  margin: 2px 0;
+}
+
+/* Saved messages and threads dialog */
+.digest-list {
+  margin: -8px -12px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.digest-item {
+  border-radius: 8px;
+}
+
+.digest-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.digest-meta span {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.digest-text {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.digest-replies {
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--green);
+}
+
 /* Presence: Do not disturb */
 .presence.dnd {
   background: #d9695f;
@@ -1648,11 +1716,6 @@ body {
     display: none;
   }
 
-  .global-search {
-    width: 400px;
-    max-width: 55vw;
-  }
-
   .channel-header {
     padding: 14px 18px;
   }
@@ -1694,22 +1757,8 @@ body {
     font-size: 23px !important;
   }
 
-  .global-search {
-    flex: 1;
-    max-width: unset;
-    width: auto;
-  }
-
-  .global-search kbd {
-    display: none;
-  }
-
   .toolbar-right {
     display: none;
-  }
-
-  .global-search .q-field__native {
-    font-size: 10px;
   }
 
   .channel-header {
@@ -1722,8 +1771,6 @@ body {
     font-size: 16px;
   }
 
-  .channel-name > .q-btn,
-  .channel-name > .q-icon,
   .member-button,
   .header-separator {
     display: none;

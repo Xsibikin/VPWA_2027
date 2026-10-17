@@ -1,7 +1,9 @@
 import type { UserChannel } from '@vpwa/shared';
-import type { Channel, Message, User } from '@/types';
+import type { Channel, Dm, Message, MessageRef, User } from '@/types';
 import {
   channels,
+  dms,
+  favorites,
   findMentions,
   invites,
   memberships,
@@ -11,6 +13,7 @@ import {
   voteKickVoters,
   voteKicks,
   type ChannelRow,
+  type DmRow,
 } from './data';
 
 // Server-side rules of the mock backend. services/api.ts (request/response) and
@@ -77,10 +80,37 @@ export function purgeInactiveChannels() {
 }
 
 export const unreadKey = (userId: string, conversationId: string) => `${userId}/${conversationId}`;
+export const isFavorite = (userId: string, conversationId: string) =>
+  favorites[userId]?.includes(conversationId) ?? false;
 export const toChannel = (row: ChannelRow, userId: string): Channel => ({
   ...row,
   unreadCount: unread[unreadKey(userId, row.id)] ?? 0,
+  favorite: isFavorite(userId, row.id),
 });
+
+// Direct messages the user takes part in, and how one looks from that user's side.
+export const dmsOf = (userId: string) => dms.filter((dm) => dm.userIds.includes(userId));
+export function toDm(row: DmRow, userId: string): Dm {
+  const otherId = row.userIds[0] === userId ? row.userIds[1] : row.userIds[0];
+  const user = users.find((u) => u.id === otherId);
+  if (!user) throw new Error('This conversation is not available.');
+  return {
+    id: row.id,
+    user,
+    unreadCount: unread[unreadKey(userId, row.id)] ?? 0,
+    favorite: isFavorite(userId, row.id),
+  };
+}
+
+// Where a message lives, if the user may still read that conversation.
+export function messageRef(message: Message, userId: string): MessageRef | undefined {
+  if (message.channelId && isMember(message.channelId, userId))
+    return { message, kind: 'channel', conversationId: message.channelId };
+  const dmId = message.dmId;
+  if (dmId && dmsOf(userId).some((dm) => dm.id === dmId))
+    return { message, kind: 'dm', conversationId: dmId };
+  return undefined;
+}
 
 export function insertMessage(senderId: string, text: string, scope: Partial<Message>): Message {
   if (!text.trim()) throw new Error('Write a message first.');

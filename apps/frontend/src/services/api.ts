@@ -1,8 +1,10 @@
 import {
   channels,
   dms,
+  favorites,
   invites,
   messages,
+  savedMessages,
   seedUserIds,
   unread,
   users,
@@ -18,14 +20,17 @@ import {
   channelMembers,
   clearVotes,
   currentUser,
+  dmsOf,
   findUserByNick,
   insertMessage,
   isMember,
   membership,
   purgeInactiveChannels,
   removeChannel,
+  messageRef,
   removeMember,
   toChannel,
+  toDm,
   unreadKey,
 } from '@/mocks/db';
 import type {
@@ -37,6 +42,7 @@ import type {
   KickResult,
   Message,
   MessagePage,
+  MessageRef,
   RegisterPayload,
   User,
   UserSettings,
@@ -75,6 +81,21 @@ function page(all: Message[], before?: string): MessagePage {
   const end = index >= 0 ? index : all.length;
   const start = Math.max(0, end - PAGE_SIZE);
   return { items: all.slice(start, end), hasMore: start > 0 };
+}
+// Resolves a direct message the signed-in user takes part in.
+function memberDm(dmId: string) {
+  const me = currentUser();
+  if (!dmsOf(me.id).some((dm) => dm.id === dmId))
+    throw new Error('This conversation is not available.');
+  return me;
+}
+// Adds the id to the user's list, or removes it when it is already there. Returns the new state.
+function toggleIn(lists: Record<string, string[]>, userId: string, id: string) {
+  const list = (lists[userId] ??= []);
+  const index = list.indexOf(id);
+  if (index >= 0) list.splice(index, 1);
+  else list.push(id);
+  return index < 0;
 }
 function ban(channelId: string, userId: string) {
   const row = membership(channelId, userId);
@@ -204,9 +225,56 @@ export async function listDms(): Promise<Dm[]> {
   // TODO: AdonisJS - replace with fetch('/api/dms')
   return delay(() => {
     const me = currentUser();
-    return dms
-      .filter((dm) => dm.user.id !== me.id)
-      .map((dm) => ({ ...dm, unreadCount: unread[unreadKey(me.id, dm.id)] ?? 0 }));
+    return dmsOf(me.id).map((row) => toDm(row, me.id));
+  });
+}
+// Opens the direct message with someone, creating the conversation the first time.
+export async function openDirectMessage(userId: string): Promise<Dm> {
+  // TODO: AdonisJS - replace with fetch('/api/dms', { method: 'POST' })
+  return delay(() => {
+    const me = currentUser();
+    if (userId === me.id) throw new Error('You cannot message yourself.');
+    if (!users.some((user) => user.id === userId)) throw new Error('User not found.');
+    let row = dmsOf(me.id).find((dm) => dm.userIds.includes(userId));
+    if (!row) {
+      row = { id: `dm-${crypto.randomUUID()}`, userIds: [me.id, userId] };
+      dms.push(row);
+    }
+    return toDm(row, me.id);
+  });
+}
+export async function toggleFavorite(conversationId: string): Promise<boolean> {
+  // TODO: AdonisJS - replace with fetch(`/api/favorites/${conversationId}`, { method: 'POST' })
+  return delay(() => toggleIn(favorites, currentUser().id, conversationId));
+}
+export async function toggleSaved(messageId: string): Promise<boolean> {
+  // TODO: AdonisJS - replace with fetch(`/api/saved/${messageId}`, { method: 'POST' })
+  return delay(() => toggleIn(savedMessages, currentUser().id, messageId));
+}
+// Saved messages, the most recently saved first.
+export async function listSaved(): Promise<MessageRef[]> {
+  // TODO: AdonisJS - replace with fetch('/api/saved')
+  return delay(() => {
+    const me = currentUser();
+    return [...(savedMessages[me.id] ?? [])].reverse().flatMap((id) => {
+      const message = messages.find((m) => m.id === id);
+      const ref = message && messageRef(message, me.id);
+      return ref ? [ref] : [];
+    });
+  });
+}
+// Messages with replies in the user's conversations, the newest first.
+export async function listThreads(): Promise<MessageRef[]> {
+  // TODO: AdonisJS - replace with fetch('/api/threads')
+  return delay(() => {
+    const me = currentUser();
+    return messages
+      .filter((m) => !m.parentId && m.replyCount > 0)
+      .flatMap((m) => {
+        const ref = messageRef(m, me.id);
+        return ref ? [ref] : [];
+      })
+      .sort((a, b) => b.message.createdAt.localeCompare(a.message.createdAt));
   });
 }
 export async function listMembers(channelId: string): Promise<User[]> {
@@ -231,12 +299,13 @@ export async function listChannelMessages(
 }
 export async function listDmMessages(dmId: string, before?: string): Promise<MessagePage> {
   // TODO: AdonisJS - replace with fetch(`/api/dms/${dmId}/messages?before=${before}`)
-  return delay(() =>
-    page(
+  return delay(() => {
+    memberDm(dmId);
+    return page(
       messages.filter((m) => m.dmId === dmId && !m.parentId),
       before,
-    ),
-  );
+    );
+  });
 }
 export async function markRead(conversationId: string): Promise<void> {
   // TODO: AdonisJS - replace with fetch(`/api/conversations/${conversationId}/read`, { method: 'POST' })
@@ -250,7 +319,7 @@ export async function sendChannelMessage(channelId: string, text: string): Promi
 }
 export async function sendDmMessage(dmId: string, text: string): Promise<Message> {
   // TODO: AdonisJS - replace with fetch(`/api/dms/${dmId}/messages`, { method: 'POST' })
-  return delay(() => insertMessage(currentUser().id, text, { dmId }));
+  return delay(() => insertMessage(memberDm(dmId).id, text, { dmId }));
 }
 export async function toggleReaction(messageId: string, emoji: string): Promise<Message> {
   // TODO: AdonisJS - replace with fetch(`/api/messages/${messageId}/reactions`, { method: 'POST' })

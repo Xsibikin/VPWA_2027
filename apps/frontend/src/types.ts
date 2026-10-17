@@ -21,16 +21,19 @@ export interface Workspace {
 export interface Channel extends ChannelRecord {
   topic: string;
   unreadCount: number;
+  favorite: boolean;
 }
 export interface ChannelInvite {
   id: string;
   channel: Channel;
   inviter: User;
 }
+// A direct message as seen by the signed-in user: `user` is the other person.
 export interface Dm {
   id: string;
   user: User;
   unreadCount: number;
+  favorite: boolean;
 }
 export interface Reaction {
   emoji: string;
@@ -48,6 +51,12 @@ export interface Message {
   reactions: Reaction[];
   replyCount: number;
   edited: boolean;
+}
+// A message shown outside its conversation (saved messages, the thread list).
+export interface MessageRef {
+  message: Message;
+  kind: 'channel' | 'dm';
+  conversationId: string;
 }
 export interface MessagePage {
   items: Message[];

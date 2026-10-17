@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useQuasar } from 'quasar';
 import { useAuthStore } from '@/stores/auth';
 import { useWorkspaceStore } from '@/stores/workspace';
@@ -13,7 +13,15 @@ const auth = useAuthStore();
 const workspace = useWorkspaceStore();
 const chat = useChatStore();
 const $q = useQuasar();
-const saved = ref(false);
+const saved = computed(() => workspace.isSaved(props.message.id));
+async function toggleSaved() {
+  try {
+    const now = await workspace.toggleSaved(props.message.id);
+    $q.notify(now ? 'Saved for later.' : 'Removed from saved messages.');
+  } catch (error) {
+    $q.notify({ type: 'negative', message: (error as Error).message });
+  }
+}
 const author = computed(() =>
   props.message.userId === auth.user?.id
     ? auth.user
@@ -170,10 +178,7 @@ function thread() {
         size="sm"
         :icon="saved ? 'bookmark' : 'bookmark_border'"
         aria-label="Save message"
-        @click="
-          saved = !saved;
-          $q.notify(saved ? 'Message saved for later.' : 'Message removed from saved.');
-        "
+        @click="toggleSaved()"
         ><q-tooltip>Save for later</q-tooltip></q-btn
       >
       <q-btn flat round dense size="sm" icon="more_horiz" aria-label="More message actions"
