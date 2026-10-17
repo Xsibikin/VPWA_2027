@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue';
-import { useQuasar, type QInput } from 'quasar';
+import type { QInput } from 'quasar';
 import type { CommandInfo } from '@/services/commands';
 import type { User } from '@/types';
 import { fullName, presenceClass } from '@/utils/user';
@@ -18,7 +18,6 @@ const props = defineProps<{
 const emit = defineEmits<{ send: [text: string] }>();
 const text = ref('');
 const input = ref<QInput | null>(null);
-const $q = useQuasar();
 const emojis = ['😊', '🙌', '💚', '🎉', '🚀', '👍', '✨', '☕', '👀', '🔥', '😂', '💡'];
 const MAX_SUGGESTIONS = 8;
 
@@ -184,32 +183,6 @@ defineExpose({ clear });
       </div>
     </div>
     <div class="composer" :class="{ compact }">
-      <div class="format-toolbar">
-        <q-btn
-          v-for="(icon, i) in [
-            'format_bold',
-            'format_italic',
-            'format_strikethrough',
-            'link',
-            'format_list_bulleted',
-            'code',
-          ]"
-          :key="icon"
-          flat
-          dense
-          size="sm"
-          :icon="icon"
-          :aria-label="
-            ['Bold', 'Italic', 'Strikethrough', 'Insert link', 'Bulleted list', 'Code'][i]
-          "
-          @click="
-            $q.notify({ message: 'Rich text formatting is coming soon.', icon: 'format_shapes' })
-          "
-          ><q-tooltip>{{
-            ['Bold', 'Italic', 'Strikethrough', 'Link', 'Bulleted list', 'Code'][i]
-          }}</q-tooltip></q-btn
-        >
-      </div>
       <q-input
         ref="input"
         v-model="text"
@@ -227,18 +200,6 @@ defineExpose({ clear });
       />
       <div class="composer-bottom">
         <div class="row items-center">
-          <q-btn
-            flat
-            round
-            dense
-            icon="add"
-            size="sm"
-            aria-label="Attach file"
-            @click="
-              $q.notify({ message: 'File attachments are coming soon.', icon: 'attach_file' })
-            "
-            ><q-tooltip>Attach a file</q-tooltip></q-btn
-          >
           <q-btn
             flat
             round
@@ -269,17 +230,6 @@ defineExpose({ clear });
             aria-label="Mention someone"
             @click="insert('@')"
             ><q-tooltip>Mention someone</q-tooltip></q-btn
-          >
-          <q-separator vertical inset class="q-mx-sm" />
-          <q-btn
-            flat
-            round
-            dense
-            icon="videocam"
-            size="sm"
-            aria-label="Record clip"
-            @click="$q.notify('Video clips are coming soon.')"
-            ><q-tooltip>Record a clip</q-tooltip></q-btn
           >
         </div>
         <q-btn
