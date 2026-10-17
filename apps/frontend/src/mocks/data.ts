@@ -1,8 +1,13 @@
 import type { Invite, UserChannel, VoteKick, VoteKickVoter } from '@vpwa/shared';
-import type { Channel, ChannelType, Dm, Message, User, Workspace } from '@/types';
+import type { Channel, ChannelType, Message, User, Workspace } from '@/types';
 
-// unreadCount is per user, so it is kept in `unread` below instead of on the row.
-export type ChannelRow = Omit<Channel, 'unreadCount'>;
+// unreadCount and favorite are per user, so they are kept outside the row (see below).
+export type ChannelRow = Omit<Channel, 'unreadCount' | 'favorite'>;
+// A direct message is a conversation between exactly two people.
+export interface DmRow {
+  id: string;
+  userIds: [string, string];
+}
 
 const DAY = 86400000;
 const daysAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString();
@@ -173,9 +178,15 @@ export const unread: Record<string, number> = {
   'u0/random': 3,
   'u0/dm-u1': 2,
 };
-export const dms: Dm[] = users
-  .slice(1)
-  .map((user, i) => ({ id: `dm-${user.id}`, user, unreadCount: i === 0 ? 2 : 0 }));
+export const dms: DmRow[] = [
+  ...users.slice(1).map((user): DmRow => ({ id: `dm-${user.id}`, userIds: ['u0', user.id] })),
+  { id: 'dm-u1-u2', userIds: ['u1', 'u2'] },
+  { id: 'dm-u2-u6', userIds: ['u2', 'u6'] },
+  { id: 'dm-u3-u4', userIds: ['u3', 'u4'] },
+];
+// Favourite conversations and saved messages, both keyed by user id.
+export const favorites: Record<string, string[]> = {};
+export const savedMessages: Record<string, string[]> = {};
 
 export const MENTION_PATTERN = /@([\w-]+)/g;
 export function findMentions(text: string): string[] {
@@ -301,20 +312,30 @@ for (const channel of channels) {
     channel.lastActivity = createdAt;
   }
 }
+const alexCopy = [
+  `Hey Alex! Got a minute to look at something together?`,
+  'Of course! What are you working on?',
+  'Just polishing the latest exploration. I think you’ll like this direction.',
+  'That sounds great. Send it over when you’re ready!',
+  'Appreciate you taking a look. Your feedback always helps.',
+  'Happy to help! Let’s catch up after the team meeting ☕',
+];
+const teamCopy = [
+  'Hey! Do you have a minute?',
+  'Sure, what’s up?',
+  'Could you look at my notes before the meeting?',
+  'Of course, I’ll send comments in ten minutes.',
+  'Thanks a lot!',
+  'Any time 🙂',
+];
 for (const dm of dms) {
-  const copy = [
-    `Hey Alex! Got a minute to look at something together?`,
-    'Of course! What are you working on?',
-    'Just polishing the latest exploration. I think you’ll like this direction.',
-    'That sounds great. Send it over when you’re ready!',
-    'Appreciate you taking a look. Your feedback always helps.',
-    'Happy to help! Let’s catch up after the team meeting ☕',
-  ];
+  const [first, second] = dm.userIds;
+  const copy = first === 'u0' ? alexCopy : teamCopy;
   for (let i = 0; i < 30; i++)
     messages.push({
       id: `${dm.id}-${i}`,
       dmId: dm.id,
-      userId: i % 2 ? 'u0' : dm.user.id,
+      userId: i % 2 ? first : second,
       text: copy[i % copy.length] ?? 'Thanks!',
       createdAt: new Date(now.getTime() - (i < 20 ? 86400000 : 0) + i * 5 * 60000).toISOString(),
       mentions: [],

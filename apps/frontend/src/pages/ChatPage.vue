@@ -5,14 +5,17 @@ import { useQuasar, type QScrollArea } from 'quasar';
 import { useAuthStore } from '@/stores/auth';
 import { useWorkspaceStore } from '@/stores/workspace';
 import { useChatStore } from '@/stores/chat';
+import ChannelListItem from '@/components/ChannelListItem.vue';
 import ChatMessage from '@/components/ChatMessage.vue';
+import DmListItem from '@/components/DmListItem.vue';
 import MessageComposer from '@/components/MessageComposer.vue';
+import MessageDigest from '@/components/MessageDigest.vue';
 import TypingIndicator from '@/components/TypingIndicator.vue';
 import { useChannelCommands } from '@/composables/useChannelCommands';
 import { useRealtime } from '@/composables/useRealtime';
 import { directMessagesKey } from '@/injectionKeys';
 import { COMMANDS, isCommand } from '@/services/commands';
-import type { Channel, ChannelInvite, UserState } from '@/types';
+import type { Channel, ChannelInvite, MessageRef, UserState } from '@/types';
 import { fullName, presenceClass, stateLabels } from '@/utils/user';
 
 const $q = useQuasar();
@@ -21,13 +24,25 @@ const auth = useAuthStore();
 const workspace = useWorkspaceStore();
 const chat = useChatStore();
 const drawer = ref($q.screen.gt.sm);
+// On wide screens the sidebar collapses to a column of avatars instead of disappearing.
+const mini = ref(false);
+const MINI_WIDTH = 76;
+const SIDEBAR_WIDTH = 260;
 const sidebarSearch = ref('');
 const messageSearch = ref('');
 const showSearch = ref(false);
+const favoritesOpen = ref(true);
 const channelsOpen = ref(true);
 const dmsOpen = ref(true);
-// 'members' lists the people in the open channel, 'people' everyone in the workspace.
-const dialog = ref<'channel' | 'members' | 'people' | 'info' | 'settings' | null>(null);
+// 'members' lists the people in the open channel.
+// 'members' lists the people in the open channel, 'people' everyone you can start a DM with.
+const dialog = ref<
+  'channel' | 'members' | 'people' | 'info' | 'settings' | 'saved' | 'threads' | null
+>(null);
+const peopleSearch = ref('');
+// Messages shown in the Saved / Threads dialog.
+const digestItems = ref<MessageRef[]>([]);
+const digestLoading = ref(false);
 const channelName = ref('');
 const channelTopic = ref('');
 const channelPrivate = ref(false);
@@ -46,6 +61,9 @@ const activeChannel = computed(() =>
   chat.kind === 'channel' ? workspace.channels.find((c) => c.id === chat.activeId) : undefined,
 );
 const activeDm = computed(() => workspace.dms.find((d) => d.id === chat.activeId));
+const currentConversation = computed(() =>
+  chat.kind === 'channel' ? activeChannel.value : activeDm.value,
+);
 const dmName = computed(() => (activeDm.value ? fullName(activeDm.value.user) : 'your teammate'));
 const title = computed(() =>
   chat.kind === 'channel' ? (activeChannel.value?.name ?? 'general') : dmName.value,
@@ -70,12 +88,21 @@ const commandUsers = computed(() => {
   );
   return { invite: outside, kick: mentionCandidates.value, revoke: mentionCandidates.value };
 });
-const headerAvatars = computed(() =>
-  chat.kind === 'channel' ? chat.members.slice(0, 3) : workspace.members.slice(1, 4),
-);
-const listedMembers = computed(() =>
-  dialog.value === 'members' && chat.kind === 'channel' ? chat.members : workspace.members,
-);
+const headerAvatars = computed(() => chat.members.slice(0, 3));
+// "New message" dialog: everyone except you, filtered by name or nick.
+const people = computed(() => {
+  const term = peopleSearch.value.trim().toLowerCase();
+  return workspace.members.filter(
+    (user) =>
+      user.id !== auth.user?.id &&
+      [user.nick, fullName(user)].some((value) => value.toLowerCase().includes(term)),
+  );
+});
+const listedMembers = computed(() => (dialog.value === 'people' ? people.value : chat.members));
+function openPeople() {
+  peopleSearch.value = '';
+  dialog.value = 'people';
+}
 const matchesSearch = (name: string) =>
   name.toLowerCase().includes(sidebarSearch.value.toLowerCase());
 const filteredChannels = computed(() => workspace.channels.filter((c) => matchesSearch(c.name)));
@@ -83,6 +110,65 @@ const filteredInvites = computed(() =>
   workspace.invites.filter((invite) => matchesSearch(invite.channel.name)),
 );
 const filteredDms = computed(() => workspace.dms.filter((d) => matchesSearch(fullName(d.user))));
+// Favourites get their own section and are not repeated below it.
+const favoriteChannels = computed(() => filteredChannels.value.filter((c) => c.favorite));
+const favoriteDms = computed(() => filteredDms.value.filter((d) => d.favorite));
+const otherChannels = computed(() => filteredChannels.value.filter((c) => !c.favorite));
+const otherDms = computed(() => filteredDms.value.filter((d) => !d.favorite));
+const miniActive = computed(() => mini.value && $q.screen.gt.sm);
+// Width the chat area has to leave free for the sidebar (0 when it floats over the page).
+const sidebarWidth = computed(() =>
+  !drawer.value || $q.screen.lt.md ? 0 : miniActive.value ? MINI_WIDTH : SIDEBAR_WIDTH,
+);
+// Collapsed sidebar: one avatar per conversation, grouped like the full list.
+interface MiniItem {
+  key: string;
+  kind: 'channel' | 'dm';
+  id: string;
+  label: string;
+  avatar: string | null;
+  letter: string;
+  unread: number;
+  group: 'invites' | 'favorites' | 'channels' | 'dms';
+}
+const channelItem = (channel: Channel, group: MiniItem['group']): MiniItem => ({
+  key: `${group}-${channel.id}`,
+  kind: 'channel',
+  id: channel.id,
+  label: `${channel.type === 'private' ? '🔒 ' : '#'}${channel.name}`,
+  avatar: null,
+  letter: channel.name.charAt(0).toUpperCase(),
+  unread: channel.unreadCount,
+  group,
+});
+const miniItems = computed<MiniItem[]>(() => [
+  ...workspace.invites.map((invite) => ({
+    ...channelItem(invite.channel, 'invites'),
+    label: `Invitation to #${invite.channel.name}`,
+  })),
+  ...favoriteChannels.value.map((c) => channelItem(c, 'favorites')),
+  ...favoriteDms.value.map((dm) => ({
+    key: `favorites-${dm.id}`,
+    kind: 'dm' as const,
+    id: dm.id,
+    label: fullName(dm.user),
+    avatar: dm.user.avatar,
+    letter: '',
+    unread: dm.unreadCount,
+    group: 'favorites' as const,
+  })),
+  ...otherChannels.value.map((c) => channelItem(c, 'channels')),
+  ...otherDms.value.map((dm) => ({
+    key: `dms-${dm.id}`,
+    kind: 'dm' as const,
+    id: dm.id,
+    label: fullName(dm.user),
+    avatar: dm.user.avatar,
+    letter: '',
+    unread: dm.unreadCount,
+    group: 'dms' as const,
+  })),
+]);
 const filteredMessages = computed(() =>
   chat.messages.filter((m) => m.text.toLowerCase().includes(messageSearch.value.toLowerCase())),
 );
@@ -95,24 +181,81 @@ const threadOpen = computed({
 });
 const mobileThread = computed(() => $q.screen.lt.lg);
 watch(
-  () => [!!chat.parent, $q.screen.width],
+  () => [!!chat.parent, $q.screen.width, sidebarWidth.value],
   () => {
-    const availableWidth = $q.screen.width - ($q.screen.gt.sm ? 332 : 72);
+    const availableWidth = $q.screen.width - 72 - sidebarWidth.value;
     split.value = Math.max(45, Math.min(78, (1 - 360 / availableWidth) * 100));
   },
 );
 function notifyError(error: unknown) {
   $q.notify({ type: 'negative', message: (error as Error).message });
 }
-// The "Message" button in a profile card opens the direct message with that person.
-const dmWith = (userId: string) => workspace.dms.find((dm) => dm.user.id === userId);
+// Opens the direct message with someone; the conversation is created the first time.
+async function messageUser(userId: string) {
+  dialog.value = null;
+  try {
+    const dm = await workspace.openDirectMessage(userId);
+    await select('dm', dm.id, dm.unreadCount);
+  } catch (error) {
+    notifyError(error);
+  }
+}
+// The "Message" button in a profile card uses this (see injectionKeys.ts).
 provide(directMessagesKey, {
-  canMessage: (userId) => !!dmWith(userId),
-  open: async (userId) => {
-    const dm = dmWith(userId);
-    if (dm) await select('dm', dm.id, dm.unreadCount);
-  },
+  canMessage: (userId) => userId !== auth.user?.id,
+  open: messageUser,
 });
+function toggleSidebar() {
+  if ($q.screen.lt.md) drawer.value = !drawer.value;
+  else {
+    drawer.value = true;
+    mini.value = !mini.value;
+  }
+}
+function openMini(item: MiniItem) {
+  // An invitation needs the full list to show its Accept / Decline buttons.
+  if (item.group === 'invites') mini.value = false;
+  else void select(item.kind, item.id, item.unread);
+}
+async function toggleFavorite(kind: 'channel' | 'dm', id: string) {
+  try {
+    await workspace.toggleFavorite(kind, id);
+  } catch (error) {
+    notifyError(error);
+  }
+}
+async function openDigest(kind: 'saved' | 'threads') {
+  dialog.value = kind;
+  digestItems.value = [];
+  digestLoading.value = true;
+  try {
+    digestItems.value =
+      kind === 'saved' ? await workspace.loadSaved() : await workspace.loadThreads();
+  } catch (error) {
+    notifyError(error);
+  } finally {
+    digestLoading.value = false;
+  }
+}
+// Opens the conversation of a saved message or a thread (and the thread itself).
+async function openRef(item: MessageRef) {
+  const showThread = dialog.value === 'threads';
+  dialog.value = null;
+  const unread =
+    (item.kind === 'channel' ? workspace.channels : workspace.dms).find(
+      (conversation) => conversation.id === item.conversationId,
+    )?.unreadCount ?? 0;
+  await select(item.kind, item.conversationId, unread);
+  if (showThread) await chat.openThread(item.message).catch(notifyError);
+}
+async function removeSaved(item: MessageRef) {
+  try {
+    await workspace.toggleSaved(item.message.id);
+    digestItems.value = digestItems.value.filter((ref) => ref.message.id !== item.message.id);
+  } catch (error) {
+    notifyError(error);
+  }
+}
 async function select(kind: 'channel' | 'dm', id: string, unread: number) {
   messageSearch.value = '';
   showSearch.value = false;
@@ -334,15 +477,6 @@ onMounted(async () => {
         <div class="gather-brand">
           <q-icon name="blur_on" size="27px" /><span>gather<span class="brand-dot">.</span></span>
         </div>
-        <div class="global-search">
-          <q-icon name="search" size="19px" /><q-input
-            v-model="sidebarSearch"
-            borderless
-            dense
-            placeholder="Search Studio North"
-            aria-label="Search workspace"
-          /><kbd></kbd>
-        </div>
         <div class="toolbar-right">
           <q-btn
             flat
@@ -368,7 +502,7 @@ onMounted(async () => {
         class="workspace-avatar active"
         label="N"
         aria-label="Studio North workspace"
-        @click="drawer = !drawer"
+        @click="toggleSidebar"
         ><q-tooltip anchor="center right" self="center left">Studio North</q-tooltip></q-btn
       >
       <q-separator class="rail-separator" />
@@ -378,7 +512,7 @@ onMounted(async () => {
         icon="chat_bubble_outline"
         class="rail-chat"
         aria-label="Open conversations"
-        @click="drawer = !drawer"
+        @click="toggleSidebar"
         ><q-badge v-if="totalUnread" rounded floating color="primary" /><q-tooltip
           anchor="center right"
           self="center left"
@@ -434,222 +568,262 @@ onMounted(async () => {
 
     <q-drawer
       v-model="drawer"
-      :width="260"
+      :width="SIDEBAR_WIDTH"
+      :mini="miniActive"
+      :mini-width="MINI_WIDTH"
       :breakpoint="1023"
       show-if-above
       bordered
       class="channel-drawer"
     >
-      <div class="sidebar-heading">
+      <div v-if="miniActive" class="mini-sidebar">
         <q-btn
           flat
-          no-caps
-          class="workspace-title"
-          icon-right="keyboard_arrow_down"
-          :label="workspace.workspace?.name ?? 'Studio North'"
-          ><q-menu
-            ><q-list style="min-width: 210px"
-              ><q-item v-close-popup clickable @click="dialog = 'settings'"
-                ><q-item-section avatar><q-icon name="settings" /></q-item-section
-                ><q-item-section>Workspace settings</q-item-section></q-item
-              ><q-item v-close-popup clickable @click="toggleTheme"
-                ><q-item-section avatar
-                  ><q-icon :name="$q.dark.isActive ? 'light_mode' : 'dark_mode'" /></q-item-section
-                ><q-item-section>Toggle theme</q-item-section></q-item
-              ><q-separator /><q-item v-close-popup clickable @click="logout"
-                ><q-item-section avatar><q-icon name="logout" /></q-item-section
-                ><q-item-section>Sign out</q-item-section></q-item
-              ></q-list
-            ></q-menu
-          ></q-btn
+          round
+          dense
+          icon="keyboard_double_arrow_right"
+          class="mini-expand"
+          aria-label="Expand the sidebar"
+          @click="toggleSidebar"
+          ><q-tooltip anchor="center right" self="center left">Expand</q-tooltip></q-btn
         >
-        <div class="workspace-status">
-          <span class="status-dot"></span
-          >{{ workspace.members.filter((m) => m.state === 'Online').length }} members online
-        </div>
-      </div>
-      <q-input
-        v-model="sidebarSearch"
-        outlined
-        dense
-        placeholder="Find a conversation"
-        class="sidebar-search"
-        aria-label="Filter channels and direct messages"
-        ><template #prepend><q-icon name="search" size="18px" /></template
-        ><template v-if="sidebarSearch" #append
-          ><q-icon name="close" class="cursor-pointer" @click="sidebarSearch = ''" /></template
-      ></q-input>
-      <q-scroll-area class="sidebar-scroll">
-        <q-list class="sidebar-shortcuts"
-          ><q-item clickable @click="$q.notify('All caught up! Your conversations live below.')"
-            ><q-item-section avatar><q-icon name="forum" size="19px" /></q-item-section
-            ><q-item-section>Threads</q-item-section></q-item
-          ><q-item
-            clickable
-            @click="$q.notify('Use the bookmark action on a message to save it for this session.')"
-            ><q-item-section avatar><q-icon name="bookmark_border" size="19px" /></q-item-section
-            ><q-item-section>Saved for later</q-item-section></q-item
-          ></q-list
-        >
-        <q-separator class="sidebar-divider" />
-        <div class="section-heading">
-          <q-btn
-            flat
-            dense
-            no-caps
-            :icon="channelsOpen ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
-            label="Channels"
-            @click="channelsOpen = !channelsOpen"
-          /><q-btn
-            flat
-            round
-            dense
-            size="sm"
-            icon="add"
-            aria-label="Create channel"
-            @click="dialog = 'channel'"
-          />
-        </div>
-        <template v-if="workspace.loading"
-          ><q-skeleton v-for="n in 6" :key="n" type="text" class="q-mx-md q-my-sm"
-        /></template>
-        <q-list v-else-if="channelsOpen" class="channel-list"
-          ><q-item v-for="invite in filteredInvites" :key="invite.id" class="invited"
-            ><q-item-section avatar
-              ><q-icon v-if="invite.channel.type === 'private'" name="lock" size="15px" /><span
-                v-else
-                class="hash"
-                >#</span
-              ></q-item-section
-            ><q-item-section
-              ><q-item-label>{{ invite.channel.name }}</q-item-label
-              ><q-item-label caption
-                >Invited by @{{ invite.inviter.nick }}</q-item-label
-              ></q-item-section
-            ><q-item-section side
-              ><div class="row no-wrap">
-                <q-btn
-                  flat
-                  round
-                  dense
-                  size="sm"
-                  icon="check"
-                  :aria-label="`Accept invitation to ${invite.channel.name}`"
-                  @click="acceptInvite(invite)"
-                  ><q-tooltip>Join channel</q-tooltip></q-btn
-                ><q-btn
-                  flat
-                  round
-                  dense
-                  size="sm"
-                  icon="close"
-                  :aria-label="`Decline invitation to ${invite.channel.name}`"
-                  @click="declineInvite(invite)"
-                  ><q-tooltip>Decline</q-tooltip></q-btn
-                >
-              </div></q-item-section
-            ></q-item
-          ><q-item
-            v-for="channel in filteredChannels"
-            :key="channel.id"
-            clickable
-            :active="chat.kind === 'channel' && chat.activeId === channel.id"
-            :class="{ 'has-unread': channel.unreadCount }"
-            @click="select('channel', channel.id, channel.unreadCount)"
-            ><q-item-section avatar
-              ><q-icon v-if="channel.type === 'private'" name="lock" size="15px" /><span
-                v-else
-                class="hash"
-                >#</span
-              ></q-item-section
-            ><q-item-section>{{ channel.name }}</q-item-section
-            ><q-item-section v-if="channel.unreadCount" side
-              ><q-badge :label="channel.unreadCount" rounded /></q-item-section
-            ><q-item-section
-              v-else-if="chat.kind === 'channel' && chat.activeId === channel.id"
-              side
-              ><span class="active-channel-dot"></span></q-item-section
-            ><q-item-section side class="channel-menu"
-              ><q-btn
+        <q-scroll-area class="mini-scroll">
+          <div class="mini-list">
+            <template v-for="(item, index) in miniItems" :key="item.key"
+              ><q-separator
+                v-if="index && item.group !== miniItems[index - 1]?.group"
+                class="mini-separator"
+              /><q-btn
                 flat
                 round
-                dense
-                size="xs"
-                icon="more_horiz"
-                :aria-label="`Actions for ${channel.name}`"
-                @click.stop
-                ><q-menu
-                  ><q-list dense style="min-width: 170px"
-                    ><q-item v-close-popup clickable @click="confirmLeave(channel)"
-                      ><q-item-section avatar><q-icon name="logout" size="17px" /></q-item-section
-                      ><q-item-section>Leave channel</q-item-section></q-item
-                    ><q-item
-                      v-if="channel.owner === auth.user?.id"
-                      v-close-popup
-                      clickable
-                      @click="confirmClose(channel)"
-                      ><q-item-section avatar
-                        ><q-icon name="delete_outline" size="17px" /></q-item-section
-                      ><q-item-section>Close channel</q-item-section></q-item
-                    ></q-list
-                  ></q-menu
-                ></q-btn
-              ></q-item-section
-            ></q-item
-          ><q-item v-if="!filteredChannels.length && !filteredInvites.length"
-            ><q-item-section class="muted">No channels found</q-item-section></q-item
-          ><q-item clickable class="add-channel" @click="dialog = 'channel'"
-            ><q-item-section avatar><q-icon name="add" size="17px" /></q-item-section
-            ><q-item-section>Add channel</q-item-section></q-item
-          ></q-list
-        >
-        <div class="section-heading dm-heading">
+                class="mini-item"
+                :class="{
+                  active: item.group !== 'invites' && chat.activeId === item.id,
+                  invited: item.group === 'invites',
+                }"
+                :aria-label="item.label"
+                @click="openMini(item)"
+                ><q-avatar size="40px" :class="{ 'mini-channel': !item.avatar }"
+                  ><img v-if="item.avatar" :src="item.avatar" alt="" /><template v-else>{{
+                    item.letter
+                  }}</template></q-avatar
+                ><q-badge
+                  v-if="item.unread"
+                  floating
+                  rounded
+                  color="primary"
+                  :label="item.unread"
+                /><q-tooltip anchor="center right" self="center left">{{
+                  item.label
+                }}</q-tooltip></q-btn
+              ></template
+            >
+          </div>
+        </q-scroll-area>
+      </div>
+      <template v-else>
+        <div class="sidebar-heading">
           <q-btn
-            flat
-            dense
-            no-caps
-            :icon="dmsOpen ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
-            label="Direct messages"
-            @click="dmsOpen = !dmsOpen"
-          /><q-btn
+            v-if="$q.screen.gt.sm"
             flat
             round
             dense
-            size="sm"
-            icon="add"
-            aria-label="Browse members"
-            @click="dialog = 'people'"
-          />
+            icon="keyboard_double_arrow_left"
+            class="sidebar-collapse"
+            aria-label="Collapse the sidebar"
+            @click="toggleSidebar"
+            ><q-tooltip>Collapse</q-tooltip></q-btn
+          >
+          <q-btn
+            flat
+            no-caps
+            class="workspace-title"
+            icon-right="keyboard_arrow_down"
+            :label="workspace.workspace?.name ?? 'Studio North'"
+            ><q-menu
+              ><q-list style="min-width: 210px"
+                ><q-item v-close-popup clickable @click="dialog = 'settings'"
+                  ><q-item-section avatar><q-icon name="settings" /></q-item-section
+                  ><q-item-section>Workspace settings</q-item-section></q-item
+                ><q-item v-close-popup clickable @click="toggleTheme"
+                  ><q-item-section avatar
+                    ><q-icon
+                      :name="$q.dark.isActive ? 'light_mode' : 'dark_mode'" /></q-item-section
+                  ><q-item-section>Toggle theme</q-item-section></q-item
+                ><q-separator /><q-item v-close-popup clickable @click="logout"
+                  ><q-item-section avatar><q-icon name="logout" /></q-item-section
+                  ><q-item-section>Sign out</q-item-section></q-item
+                ></q-list
+              ></q-menu
+            ></q-btn
+          >
+          <div class="workspace-status">
+            <span class="status-dot"></span
+            >{{ workspace.members.filter((m) => m.state === 'Online').length }} members online
+          </div>
         </div>
-        <q-list v-if="dmsOpen" class="dm-list"
-          ><q-item
-            v-for="dm in filteredDms"
-            :key="dm.id"
-            clickable
-            :active="chat.kind === 'dm' && chat.activeId === dm.id"
-            :class="{ 'has-unread': dm.unreadCount }"
-            @click="select('dm', dm.id, dm.unreadCount)"
-            ><q-item-section avatar
-              ><div class="dm-avatar">
-                <q-avatar size="25px"
-                  ><img :src="dm.user.avatar" :alt="fullName(dm.user)" /></q-avatar
-                ><span
-                  class="presence"
-                  :class="presenceClass(dm.user.state)"
-                ></span></div></q-item-section
-            ><q-item-section>{{ fullName(dm.user) }}</q-item-section
-            ><q-item-section v-if="dm.unreadCount" side
-              ><q-badge :label="dm.unreadCount" rounded /></q-item-section
-            ><q-item-section v-else-if="dm.user.state === 'DND'" side
-              ><q-icon name="dark_mode" size="12px" /></q-item-section></q-item
-          ><q-item v-if="!filteredDms.length && !workspace.loading"
-            ><q-item-section class="muted">No teammates found</q-item-section></q-item
-          ></q-list
-        >
-      </q-scroll-area>
+        <q-input
+          v-model="sidebarSearch"
+          outlined
+          dense
+          placeholder="Find a conversation"
+          class="sidebar-search"
+          aria-label="Filter channels and direct messages"
+          ><template #prepend><q-icon name="search" size="18px" /></template
+          ><template v-if="sidebarSearch" #append
+            ><q-icon name="close" class="cursor-pointer" @click="sidebarSearch = ''" /></template
+        ></q-input>
+        <q-scroll-area class="sidebar-scroll">
+          <q-list class="sidebar-shortcuts"
+            ><q-item clickable @click="openDigest('threads')"
+              ><q-item-section avatar><q-icon name="forum" size="19px" /></q-item-section
+              ><q-item-section>Threads</q-item-section></q-item
+            ><q-item clickable @click="openDigest('saved')"
+              ><q-item-section avatar><q-icon name="bookmark_border" size="19px" /></q-item-section
+              ><q-item-section>Saved for later</q-item-section
+              ><q-item-section v-if="workspace.savedIds.length" side
+                ><q-badge :label="workspace.savedIds.length" rounded /></q-item-section></q-item
+          ></q-list>
+          <q-separator class="sidebar-divider" />
+          <template v-if="favoriteChannels.length || favoriteDms.length"
+            ><div class="section-heading">
+              <q-btn
+                flat
+                dense
+                no-caps
+                :icon="favoritesOpen ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
+                label="Favorites"
+                @click="favoritesOpen = !favoritesOpen"
+              />
+            </div>
+            <template v-if="favoritesOpen"
+              ><q-list class="channel-list"
+                ><ChannelListItem
+                  v-for="channel in favoriteChannels"
+                  :key="channel.id"
+                  :channel="channel"
+                  :active="chat.kind === 'channel' && chat.activeId === channel.id"
+                  :is-admin="channel.owner === auth.user?.id"
+                  @select="select('channel', channel.id, channel.unreadCount)"
+                  @favorite="toggleFavorite('channel', channel.id)"
+                  @leave="confirmLeave(channel)"
+                  @close="confirmClose(channel)" /></q-list
+              ><q-list class="dm-list favorite-dms"
+                ><DmListItem
+                  v-for="dm in favoriteDms"
+                  :key="dm.id"
+                  :dm="dm"
+                  :active="chat.kind === 'dm' && chat.activeId === dm.id"
+                  @select="select('dm', dm.id, dm.unreadCount)" /></q-list></template
+          ></template>
+          <div class="section-heading">
+            <q-btn
+              flat
+              dense
+              no-caps
+              :icon="channelsOpen ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
+              label="Channels"
+              @click="channelsOpen = !channelsOpen"
+            /><q-btn
+              flat
+              round
+              dense
+              size="sm"
+              icon="add"
+              aria-label="Create channel"
+              @click="dialog = 'channel'"
+            />
+          </div>
+          <template v-if="workspace.loading"
+            ><q-skeleton v-for="n in 6" :key="n" type="text" class="q-mx-md q-my-sm"
+          /></template>
+          <q-list v-else-if="channelsOpen" class="channel-list"
+            ><q-item v-for="invite in filteredInvites" :key="invite.id" class="invited"
+              ><q-item-section avatar
+                ><q-icon v-if="invite.channel.type === 'private'" name="lock" size="15px" /><span
+                  v-else
+                  class="hash"
+                  >#</span
+                ></q-item-section
+              ><q-item-section
+                ><q-item-label>{{ invite.channel.name }}</q-item-label
+                ><q-item-label caption
+                  >Invited by @{{ invite.inviter.nick }}</q-item-label
+                ></q-item-section
+              ><q-item-section side
+                ><div class="row no-wrap">
+                  <q-btn
+                    flat
+                    round
+                    dense
+                    size="sm"
+                    icon="check"
+                    :aria-label="`Accept invitation to ${invite.channel.name}`"
+                    @click="acceptInvite(invite)"
+                    ><q-tooltip>Join channel</q-tooltip></q-btn
+                  ><q-btn
+                    flat
+                    round
+                    dense
+                    size="sm"
+                    icon="close"
+                    :aria-label="`Decline invitation to ${invite.channel.name}`"
+                    @click="declineInvite(invite)"
+                    ><q-tooltip>Decline</q-tooltip></q-btn
+                  >
+                </div></q-item-section
+              ></q-item
+            ><ChannelListItem
+              v-for="channel in otherChannels"
+              :key="channel.id"
+              :channel="channel"
+              :active="chat.kind === 'channel' && chat.activeId === channel.id"
+              :is-admin="channel.owner === auth.user?.id"
+              @select="select('channel', channel.id, channel.unreadCount)"
+              @favorite="toggleFavorite('channel', channel.id)"
+              @leave="confirmLeave(channel)"
+              @close="confirmClose(channel)"
+            /><q-item v-if="!filteredChannels.length && !filteredInvites.length"
+              ><q-item-section class="muted">No channels found</q-item-section></q-item
+            ></q-list
+          >
+          <div class="section-heading dm-heading">
+            <q-btn
+              flat
+              dense
+              no-caps
+              :icon="dmsOpen ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
+              label="Direct messages"
+              @click="dmsOpen = !dmsOpen"
+            /><q-btn
+              flat
+              round
+              dense
+              size="sm"
+              icon="add"
+              aria-label="New message"
+              @click="openPeople"
+              ><q-tooltip>New message</q-tooltip></q-btn
+            >
+          </div>
+          <q-list v-if="dmsOpen" class="dm-list"
+            ><DmListItem
+              v-for="dm in otherDms"
+              :key="dm.id"
+              :dm="dm"
+              :active="chat.kind === 'dm' && chat.activeId === dm.id"
+              @select="select('dm', dm.id, dm.unreadCount)"
+            /><q-item v-if="!filteredDms.length && !workspace.loading"
+              ><q-item-section class="muted">No conversations yet</q-item-section></q-item
+            ></q-list
+          >
+        </q-scroll-area>
+      </template>
     </q-drawer>
 
-    <q-page-container class="chat-page-container"
+    <q-page-container
+      class="chat-page-container"
+      :style="{ '--sidebar-width': `${sidebarWidth}px` }"
       ><q-page
         class="chat-page"
         :style-fn="() => ({ height: 'calc(100dvh - 56px)', minHeight: '0' })"
@@ -662,7 +836,7 @@ onMounted(async () => {
             icon="menu"
             class="mobile-menu"
             aria-label="Open sidebar"
-            @click="drawer = !drawer"
+            @click="toggleSidebar"
           />
           <div class="channel-identity">
             <div class="channel-name">
@@ -676,29 +850,37 @@ onMounted(async () => {
                 ><img :src="activeDm?.user.avatar" :alt="title"
               /></q-avatar>
               <h1>{{ title }}</h1>
-              <q-icon name="keyboard_arrow_down" size="17px" /><q-btn
+              <q-btn
                 flat
                 round
                 dense
                 size="sm"
-                icon="star_border"
-                aria-label="Favorite conversation"
-                @click="$q.notify('Conversation added to your favorites for this session.')"
-              />
+                :icon="currentConversation?.favorite ? 'star' : 'star_border'"
+                :class="{ 'is-favorite': currentConversation?.favorite }"
+                :aria-label="
+                  currentConversation?.favorite ? 'Remove from favorites' : 'Add to favorites'
+                "
+                @click="toggleFavorite(chat.kind, chat.activeId)"
+                ><q-tooltip>{{
+                  currentConversation?.favorite ? 'Remove from favorites' : 'Add to favorites'
+                }}</q-tooltip></q-btn
+              >
             </div>
             <p>{{ topic }}</p>
           </div>
-          <q-space /><q-btn
-            flat
-            no-caps
-            class="member-button"
-            aria-label="View channel members"
-            @click="dialog = 'members'"
-            ><div class="header-avatars">
-              <img v-for="user in headerAvatars" :key="user.id" :src="user.avatar" alt="" />
-            </div>
-            <span>{{ chat.kind === 'channel' ? chat.members.length : 2 }}</span></q-btn
-          ><q-separator vertical inset class="header-separator" /><q-btn
+          <q-space /><template v-if="chat.kind === 'channel'"
+            ><q-btn
+              flat
+              no-caps
+              class="member-button"
+              aria-label="View channel members"
+              @click="dialog = 'members'"
+              ><div class="header-avatars">
+                <img v-for="user in headerAvatars" :key="user.id" :src="user.avatar" alt="" />
+              </div>
+              <span>{{ chat.members.length }}</span></q-btn
+            ><q-separator vertical inset class="header-separator" /></template
+          ><q-btn
             flat
             round
             dense
@@ -792,9 +974,7 @@ onMounted(async () => {
                       <q-spinner-dots color="primary" size="30px" /></div></template
                   ><template v-for="(message, index) in filteredMessages" :key="message.id"
                     ><div v-if="newDay(index)" class="day-divider">
-                      <q-separator /><span
-                        >{{ dateLabel(message.createdAt)
-                        }}<q-icon name="keyboard_arrow_down" size="14px" /></span
+                      <q-separator /><span>{{ dateLabel(message.createdAt) }}</span
                       ><q-separator />
                     </div>
                     <div
@@ -949,13 +1129,17 @@ onMounted(async () => {
             {{
               dialog === 'channel'
                 ? 'A new place to connect'
-                : dialog === 'members' && activeChannel
+                : dialog === 'members'
                   ? `Members of #${title}`
-                  : dialog === 'members' || dialog === 'people'
-                    ? 'Good company'
+                  : dialog === 'people'
+                    ? 'New message'
                     : dialog === 'settings'
                       ? 'Make it yours'
-                      : `About ${chat.kind === 'channel' ? '#' : ''}${title}`
+                      : dialog === 'saved'
+                        ? 'Saved for later'
+                        : dialog === 'threads'
+                          ? 'Threads'
+                          : `About ${chat.kind === 'channel' ? '#' : ''}${title}`
             }}
           </h2>
           <q-space /><q-btn
@@ -987,35 +1171,56 @@ onMounted(async () => {
               type="submit"
               :loading="creating"
           /></q-form>
-          <q-list v-else-if="dialog === 'members' || dialog === 'people'"
-            ><q-item
-              v-for="member in listedMembers"
-              :key="member.id"
-              clickable
-              @click="
-                workspace.dms.find((d) => d.user.id === member.id) &&
-                  select('dm', workspace.dms.find((d) => d.user.id === member.id)!.id, 0);
-                dialog = null;
-              "
-              ><q-item-section avatar
-                ><q-avatar size="38px"
-                  ><img :src="member.avatar" :alt="fullName(member)" /></q-avatar></q-item-section
-              ><q-item-section
-                ><b>{{ fullName(member) }}</b
-                ><small class="muted"
-                  >@{{ member.nick }}
-                  <span v-if="dialog === 'members' && member.id === activeChannel?.owner"
-                    >· admin</span
-                  ></small
-                ></q-item-section
-              ><q-item-section side
-                ><div class="row items-center no-wrap q-gutter-x-sm">
-                  <small class="muted">{{ stateLabels[member.state] }}</small
-                  ><span
-                    class="presence inline-presence"
-                    :class="presenceClass(member.state)"
-                  ></span></div></q-item-section></q-item
-          ></q-list>
+          <div v-else-if="dialog === 'members' || dialog === 'people'">
+            <q-input
+              v-if="dialog === 'people'"
+              v-model="peopleSearch"
+              outlined
+              dense
+              autofocus
+              placeholder="Search by name or nickname"
+              class="q-mb-sm"
+              ><template #prepend><q-icon name="search" size="18px" /></template
+            ></q-input>
+            <q-list
+              ><q-item
+                v-for="member in listedMembers"
+                :key="member.id"
+                :clickable="member.id !== auth.user?.id"
+                @click="member.id !== auth.user?.id && messageUser(member.id)"
+                ><q-item-section avatar
+                  ><q-avatar size="38px"
+                    ><img :src="member.avatar" :alt="fullName(member)" /></q-avatar></q-item-section
+                ><q-item-section
+                  ><b>{{ fullName(member) }}</b
+                  ><small class="muted"
+                    >@{{ member.nick }}
+                    <span v-if="dialog === 'members' && member.id === activeChannel?.owner"
+                      >· admin</span
+                    ></small
+                  ></q-item-section
+                ><q-item-section side
+                  ><div class="row items-center no-wrap q-gutter-x-sm">
+                    <small class="muted">{{ stateLabels[member.state] }}</small
+                    ><span
+                      class="presence inline-presence"
+                      :class="presenceClass(member.state)"
+                    ></span></div></q-item-section></q-item
+            ></q-list>
+          </div>
+          <MessageDigest
+            v-else-if="dialog === 'saved' || dialog === 'threads'"
+            :items="digestItems"
+            :loading="digestLoading"
+            :removable="dialog === 'saved'"
+            :empty-text="
+              dialog === 'saved'
+                ? 'Nothing saved yet. Use the bookmark on a message to keep it here.'
+                : 'No threads yet. Reply to a message to start one.'
+            "
+            @open="openRef"
+            @remove="removeSaved"
+          />
           <div v-else-if="dialog === 'settings'">
             <p class="muted">{{ workspace.workspace?.description }}</p>
             <q-item
@@ -1116,11 +1321,12 @@ onMounted(async () => {
               us together.
             </p>
             <q-btn
+              v-if="activeChannel"
               flat
               no-caps
               color="primary"
               icon="people_outline"
-              :label="`${chat.kind === 'channel' ? chat.members.length : 2} members`"
+              :label="`${chat.members.length} members`"
               @click="dialog = 'members'"
             />
           </div> </q-card-section></q-card

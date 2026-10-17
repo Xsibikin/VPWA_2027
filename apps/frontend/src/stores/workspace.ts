@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import * as api from '@/services/api';
-import type { Channel, ChannelInvite, ChannelType, Dm, User, Workspace } from '@/types';
+import type { Channel, ChannelInvite, ChannelType, Dm, MessageRef, User, Workspace } from '@/types';
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const workspace = ref<Workspace | null>(null);
@@ -12,18 +12,22 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const dms = ref<Dm[]>([]);
   // Everyone in the workspace; used to resolve message authors and nicknames.
   const members = ref<User[]>([]);
+  // Ids of the messages the user saved for later.
+  const savedIds = ref<string[]>([]);
   const loading = ref(false);
 
   async function load() {
     loading.value = true;
     try {
-      const [w, c, i, d, m] = await Promise.all([
+      const [w, c, i, d, m, s] = await Promise.all([
         api.getWorkspace(),
         api.listChannels(),
         api.listInvites(),
         api.listDms(),
         api.listUsers(),
+        api.listSaved(),
       ]);
+      savedIds.value = s.map((ref) => ref.message.id);
       workspace.value = w;
       channels.value = c;
       invites.value = i;
@@ -86,6 +90,39 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     return (kind === 'channel' ? channels.value : dms.value).find((item) => item.id === id);
   }
 
+  async function toggleFavorite(kind: 'channel' | 'dm', id: string) {
+    const favorite = await api.toggleFavorite(id);
+    const item = find(kind, id);
+    if (item) item.favorite = favorite;
+  }
+
+  // Opens (or starts) the direct message with someone and keeps the sidebar list in step.
+  async function openDirectMessage(userId: string) {
+    const dm = await api.openDirectMessage(userId);
+    if (!dms.value.some((item) => item.id === dm.id)) dms.value.push(dm);
+    return dm;
+  }
+
+  const isSaved = (messageId: string) => savedIds.value.includes(messageId);
+
+  async function toggleSaved(messageId: string) {
+    const saved = await api.toggleSaved(messageId);
+    savedIds.value = saved
+      ? [...savedIds.value, messageId]
+      : savedIds.value.filter((id) => id !== messageId);
+    return saved;
+  }
+
+  async function loadSaved(): Promise<MessageRef[]> {
+    const refs = await api.listSaved();
+    savedIds.value = refs.map((ref) => ref.message.id);
+    return refs;
+  }
+
+  function loadThreads() {
+    return api.listThreads();
+  }
+
   function markRead(kind: 'channel' | 'dm', id: string) {
     const item = find(kind, id);
     if (item) item.unreadCount = 0;
@@ -114,5 +151,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     syncMember,
     markRead,
     addUnread,
+    savedIds,
+    toggleFavorite,
+    openDirectMessage,
+    isSaved,
+    toggleSaved,
+    loadSaved,
+    loadThreads,
   };
 });
